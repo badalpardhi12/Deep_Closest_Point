@@ -11,14 +11,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import MultiStepLR
-from data import ModelNet40
+from data import ModelNet40, ModelNet10
 from model import DCP
-from util import transform_point_cloud, npmat2euler
+from util import transform_point_cloud, npmat2euler, render_clouds, save_clouds
 import numpy as np
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
-
+from path import Path
+import wandb
 
 # Part of the code is referred from: https://github.com/floodsung/LearningToCompare_FSL
 
@@ -47,8 +48,10 @@ def _init_(args):
     os.system('cp data.py checkpoints' + '/' + args.exp_name + '/' + 'data.py.backup')
 
 
-def test_one_epoch(args, net, test_loader):
+def test_one_epoch(args, net, test_loader, epoch):
     net.eval()
+    print("Testing starting")
+    torch.cuda.empty_cache()
     mse_ab = 0
     mae_ab = 0
     mse_ba = 0
@@ -70,6 +73,7 @@ def test_one_epoch(args, net, test_loader):
     eulers_ab = []
     eulers_ba = []
 
+    
     for src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba in tqdm(test_loader):
         src = src.cuda()
         target = target.cuda()
@@ -98,7 +102,8 @@ def test_one_epoch(args, net, test_loader):
         transformed_src = transform_point_cloud(src, rotation_ab_pred, translation_ab_pred)
 
         transformed_target = transform_point_cloud(target, rotation_ba_pred, translation_ba_pred)
-
+        #render_clouds(transformed_src, target)
+        
         ###########################
         identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
         loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
@@ -122,7 +127,9 @@ def test_one_epoch(args, net, test_loader):
 
         mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
         mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
-
+        torch.cuda.empty_cache()
+    
+    #save_clouds(transformed_src, target, epoch)
     rotations_ab = np.concatenate(rotations_ab, axis=0)
     translations_ab = np.concatenate(translations_ab, axis=0)
     rotations_ab_pred = np.concatenate(rotations_ab_pred, axis=0)
@@ -143,7 +150,7 @@ def test_one_epoch(args, net, test_loader):
            translations_ba, rotations_ba_pred, translations_ba_pred, eulers_ab, eulers_ba
 
 
-def train_one_epoch(args, net, train_loader, opt):
+def train_one_epoch(args, net, train_loader, opt, epoch):
     net.train()
 
     mse_ab = 0
@@ -166,7 +173,7 @@ def train_one_epoch(args, net, train_loader, opt):
 
     eulers_ab = []
     eulers_ba = []
-
+    
     for src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba in tqdm(train_loader):
         src = src.cuda()
         target = target.cuda()
@@ -221,7 +228,9 @@ def train_one_epoch(args, net, train_loader, opt):
 
         mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
         mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
-
+    
+    save_clouds(src, target, epoch, name="input")
+    save_clouds(transformed_src, target, epoch)
     rotations_ab = np.concatenate(rotations_ab, axis=0)
     translations_ab = np.concatenate(translations_ab, axis=0)
     rotations_ab_pred = np.concatenate(rotations_ab_pred, axis=0)
@@ -316,18 +325,20 @@ def train(args, net, train_loader, test_loader, boardio, textio):
     best_test_t_rmse_ba = np.inf
     best_test_t_mae_ba = np.inf
 
-    for epoch in range(args.epochs):
+    for epoch in range(100, args.epochs+100):
+        torch.cuda.empty_cache()
         scheduler.step()
         train_loss, train_cycle_loss, \
         train_mse_ab, train_mae_ab, train_mse_ba, train_mae_ba, train_rotations_ab, train_translations_ab, \
         train_rotations_ab_pred, \
         train_translations_ab_pred, train_rotations_ba, train_translations_ba, train_rotations_ba_pred, \
-        train_translations_ba_pred, train_eulers_ab, train_eulers_ba = train_one_epoch(args, net, train_loader, opt)
+        train_translations_ba_pred, train_eulers_ab, train_eulers_ba = train_one_epoch(args, net, train_loader, opt, epoch)
+        
         test_loss, test_cycle_loss, \
         test_mse_ab, test_mae_ab, test_mse_ba, test_mae_ba, test_rotations_ab, test_translations_ab, \
         test_rotations_ab_pred, \
         test_translations_ab_pred, test_rotations_ba, test_translations_ba, test_rotations_ba_pred, \
-        test_translations_ba_pred, test_eulers_ab, test_eulers_ba = test_one_epoch(args, net, test_loader)
+        test_translations_ba_pred, test_eulers_ab, test_eulers_ba = test_one_epoch(args, net, test_loader, epoch)   
         train_rmse_ab = np.sqrt(train_mse_ab)
         test_rmse_ab = np.sqrt(test_mse_ab)
 
@@ -458,7 +469,7 @@ def train(args, net, train_loader, test_loader, boardio, textio):
         boardio.add_scalar('B->A/train/translation/MSE', train_t_mse_ba, epoch)
         boardio.add_scalar('B->A/train/translation/RMSE', train_t_rmse_ba, epoch)
         boardio.add_scalar('B->A/train/translation/MAE', train_t_mae_ba, epoch)
-
+        wandb.log({'rotation/MSE': train_r_mse_ab, 'translation/MSE': train_mse_ab}, step=epoch)
         ############TEST
         boardio.add_scalar('A->B/test/loss', test_loss, epoch)
         boardio.add_scalar('A->B/test/MSE', test_mse_ab, epoch)
@@ -519,8 +530,8 @@ def main():
     parser.add_argument('--model', type=str, default='dcp', metavar='N',
                         choices=['dcp'],
                         help='Model to use, [dcp]')
-    parser.add_argument('--emb_nn', type=str, default='pointnet', metavar='N',
-                        choices=['pointnet', 'dgcnn'],
+    parser.add_argument('--emb_nn', type=str, default='idgcn', metavar='N',
+                        choices=['pointnet', 'dgcnn', 'idgcn'],
                         help='Embedding nn to use, [pointnet, dgcnn]')
     parser.add_argument('--pointer', type=str, default='transformer', metavar='N',
                         choices=['identity', 'transformer'],
@@ -538,11 +549,11 @@ def main():
                         help='Num of dimensions of fc in transformer')
     parser.add_argument('--dropout', type=float, default=0.0, metavar='N',
                         help='Dropout ratio in transformer')
-    parser.add_argument('--batch_size', type=int, default=32, metavar='batch_size',
+    parser.add_argument('--batch_size', type=int, default=8, metavar='batch_size',
                         help='Size of batch)')
-    parser.add_argument('--test_batch_size', type=int, default=10, metavar='batch_size',
+    parser.add_argument('--test_batch_size', type=int, default=2, metavar='batch_size',
                         help='Size of batch)')
-    parser.add_argument('--epochs', type=int, default=250, metavar='N',
+    parser.add_argument('--epochs', type=int, default=100, metavar='N',
                         help='number of episode to train ')
     parser.add_argument('--use_sgd', action='store_true', default=False,
                         help='Use SGD')
@@ -564,11 +575,11 @@ def main():
                         help='Wheter to test on unseen category')
     parser.add_argument('--num_points', type=int, default=1024, metavar='N',
                         help='Num of points to use')
-    parser.add_argument('--dataset', type=str, default='modelnet40', choices=['modelnet40'], metavar='N',
+    parser.add_argument('--dataset', type=str, default='modelnet40', choices=['modelnet40', 'modelnet10'], metavar='N',
                         help='dataset to use')
     parser.add_argument('--factor', type=float, default=4, metavar='N',
                         help='Divided factor for rotations')
-    parser.add_argument('--model_path', type=str, default='', metavar='N',
+    parser.add_argument('--model_path', type=str, default='pretrained/dcp_v1.t7', metavar='N',
                         help='Pretrained model path')
 
     args = parser.parse_args()
@@ -578,6 +589,7 @@ def main():
     np.random.seed(args.seed)
 
     boardio = SummaryWriter(log_dir='checkpoints/' + args.exp_name)
+    wandb.init(project="InceptionDCPwithMultiHeadAttention")
     _init_(args)
 
     textio = IOStream('checkpoints/' + args.exp_name + '/run.log')
@@ -592,13 +604,20 @@ def main():
             ModelNet40(num_points=args.num_points, partition='test', gaussian_noise=args.gaussian_noise,
                        unseen=args.unseen, factor=args.factor),
             batch_size=args.test_batch_size, shuffle=False, drop_last=False)
+    elif args.dataset == 'modelnet10':
+        train_loader = DataLoader(
+            ModelNet10(Path("ModelNet10"), args.num_points),
+            batch_size=args.batch_size, shuffle=True, drop_last=False)
+        test_loader = DataLoader(
+            ModelNet10(Path("ModelNet10"), args.num_points, partition="test"),
+            batch_size=args.batch_size, shuffle=False, drop_last=False)
     else:
         raise Exception("not implemented")
-
+    start_from_checkpoint = False
     if args.model == 'dcp':
         net = DCP(args).cuda()
         if args.eval:
-            if args.model_path is '':
+            if args.model_path == '':
                 model_path = 'checkpoints' + '/' + args.exp_name + '/models/model.best.t7'
             else:
                 model_path = args.model_path
@@ -615,6 +634,9 @@ def main():
     if args.eval:
         test(args, net, test_loader, boardio, textio)
     else:
+        if start_from_checkpoint:
+            print("loaded")
+            net.load_state_dict(torch.load("/home/akshay/Deep_Closest_Point/checkpoints/exp/models/model.99.t7"))
         train(args, net, train_loader, test_loader, boardio, textio)
 
 

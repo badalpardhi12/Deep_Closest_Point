@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-
+import time
 import os
 import sys
 import glob
@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from util import quat2mat
-
+from idgcn import FeatureExtractor
 
 # Part of the code is referred from: http://nlp.seas.harvard.edu/2018/04/03/attention.html#positional-encoding
 
@@ -275,7 +275,7 @@ class PointNet(nn.Module):
 
 
 class DGCNN(nn.Module):
-    def __init__(self, emb_dims=512):
+    def __init__(self, emb_dims=512, agg_fun_name='max'):
         super(DGCNN, self).__init__()
         self.conv1 = nn.Conv2d(6, 64, kernel_size=1, bias=False)
         self.conv2 = nn.Conv2d(64, 64, kernel_size=1, bias=False)
@@ -287,8 +287,20 @@ class DGCNN(nn.Module):
         self.bn3 = nn.BatchNorm2d(128)
         self.bn4 = nn.BatchNorm2d(256)
         self.bn5 = nn.BatchNorm2d(emb_dims)
+        
+        if agg_fun_name == 'max':
+            self.agg_fn = lambda x: torch.max(x, dim=-1, keepdim=True)[0]
+        elif agg_fun_name == 'min':
+            self.agg_fn = lambda x: torch.min(x, dim=-1, keepdim=True)[0]
+        elif agg_fun_name == 'sum':
+            self.agg_fn = lambda x: torch.sum(x, dim=-1, keepdim=True)
+        elif agg_fun_name == "none":
+            self.agg_fn = lambda x: x
+        elif agg_fun_name == 'attention':
+            pass
 
     def forward(self, x):
+        dgcnn_start_time = time.time()
         batch_size, num_dims, num_points = x.size()
         x = get_graph_feature(x)
         x = F.relu(self.bn1(self.conv1(x)))
@@ -306,6 +318,7 @@ class DGCNN(nn.Module):
         x = torch.cat((x1, x2, x3, x4), dim=1)
 
         x = F.relu(self.bn5(self.conv5(x))).view(batch_size, -1, num_points)
+        #print("DGCNN took: ", time.time()-dgcnn_start_time)
         return x
 
 
@@ -380,6 +393,7 @@ class SVDHead(nn.Module):
         self.reflect[2, 2] = -1
 
     def forward(self, *input):
+        svd_start_time = time.time()
         src_embedding = input[0]
         tgt_embedding = input[1]
         src = input[2]
@@ -422,6 +436,7 @@ class SVDHead(nn.Module):
         R = torch.stack(R, dim=0)
 
         t = torch.matmul(-R, src.mean(dim=2, keepdim=True)) + src_corr.mean(dim=2, keepdim=True)
+        #print('SVD took:', time.time()-svd_start_time)
         return R, t.view(batch_size, 3)
 
 
@@ -434,6 +449,9 @@ class DCP(nn.Module):
             self.emb_nn = PointNet(emb_dims=self.emb_dims)
         elif args.emb_nn == 'dgcnn':
             self.emb_nn = DGCNN(emb_dims=self.emb_dims)
+        elif args.emb_nn == 'idgcn':
+            print("Using IDGCN")
+            self.emb_nn = FeatureExtractor(features_dim=[3, 128, 256, 256])
         else:
             raise Exception('Not implemented')
 
