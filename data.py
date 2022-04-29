@@ -71,9 +71,9 @@ def jitter_pointcloud(pointcloud, sigma=0.01, clip=0.05):
 class ModelNet40(Dataset):
     def __init__(self, num_points, partition='train', gaussian_noise=False, unseen=False, factor=4):
         if partition == 'train':
-            self.data, self.label = load_data(partition, 2)
+            self.data, self.label = load_data(partition, 5)
         else:
-            self.data, self.label = load_data(partition, 1)
+            self.data, self.label = load_data(partition, 5)
         self.num_points = num_points
         self.partition = partition
         self.gaussian_noise = gaussian_noise

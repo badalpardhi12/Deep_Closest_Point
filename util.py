@@ -63,14 +63,14 @@ def render_clouds(src, tar):
     pcd.points = o3d.utility.Vector3dVector(xyz)
     o3d.visualization.draw_geometries([pcd])
 
-def save_clouds(src, tar, epoch, name=None):
+def save_clouds(src, tar, epoch, name=None, basefilename="idgcn/"):
     src = src.detach().cpu().numpy()[0]
     tar = tar.detach().cpu().numpy()[0]
     src = src.transpose(1,0)
     tar = tar.transpose(1,0)
     xyz = np.concatenate([src, tar], axis=0)  
     if name == "input":
-        filename = "dcpv-1_org/sample_input_" + str(epoch) 
+        filename = basefilename + "sample_input_" + str(epoch) 
     else:
-        filename = "dcpv-1_org/sample_output" + str(epoch)
+        filename =  basefilename +"sample_output_" + str(epoch)
     np.save(filename, xyz)

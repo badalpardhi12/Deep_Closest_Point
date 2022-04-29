@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from util import quat2mat
 from idgcn import FeatureExtractor
+from attention import MultiHeadGraphAttention
 
 # Part of the code is referred from: http://nlp.seas.harvard.edu/2018/04/03/attention.html#positional-encoding
 
@@ -277,6 +278,7 @@ class PointNet(nn.Module):
 class DGCNN(nn.Module):
     def __init__(self, emb_dims=512, agg_fun_name='max'):
         super(DGCNN, self).__init__()
+        print("Using DGCNN")
         self.conv1 = nn.Conv2d(6, 64, kernel_size=1, bias=False)
         self.conv2 = nn.Conv2d(64, 64, kernel_size=1, bias=False)
         self.conv3 = nn.Conv2d(64, 128, kernel_size=1, bias=False)
@@ -287,7 +289,9 @@ class DGCNN(nn.Module):
         self.bn3 = nn.BatchNorm2d(128)
         self.bn4 = nn.BatchNorm2d(256)
         self.bn5 = nn.BatchNorm2d(emb_dims)
-        
+        self.attention_list = nn.ModuleList()
+        self.agg_fun_name = agg_fun_name
+
         if agg_fun_name == 'max':
             self.agg_fn = lambda x: torch.max(x, dim=-1, keepdim=True)[0]
         elif agg_fun_name == 'min':
@@ -297,23 +301,39 @@ class DGCNN(nn.Module):
         elif agg_fun_name == "none":
             self.agg_fn = lambda x: x
         elif agg_fun_name == 'attention':
-            pass
+            print("Using attention")
+            self.attention_list.append(MultiHeadGraphAttention(64, 3))
+            self.attention_list.append(MultiHeadGraphAttention(64, 3))
+            self.attention_list.append(MultiHeadGraphAttention(128, 3))
+            self.attention_list.append(MultiHeadGraphAttention(256, 3))
 
     def forward(self, x):
         dgcnn_start_time = time.time()
         batch_size, num_dims, num_points = x.size()
         x = get_graph_feature(x)
         x = F.relu(self.bn1(self.conv1(x)))
-        x1 = x.max(dim=-1, keepdim=True)[0]
+        if self.agg_fun_name == 'attention':
+            x1 = self.attention_list[0](x)
+        else:
+            x1 = self.agg_fn(x)
 
         x = F.relu(self.bn2(self.conv2(x)))
-        x2 = x.max(dim=-1, keepdim=True)[0]
+        if self.agg_fun_name == 'attention':
+            x2 = self.attention_list[1](x)
+        else:
+            x2 = self.agg_fn(x)
 
         x = F.relu(self.bn3(self.conv3(x)))
-        x3 = x.max(dim=-1, keepdim=True)[0]
+        if self.agg_fun_name == 'attention':
+            x3 = self.attention_list[2](x)
+        else:
+            x3 = self.agg_fn(x)
 
         x = F.relu(self.bn4(self.conv4(x)))
-        x4 = x.max(dim=-1, keepdim=True)[0]
+        if self.agg_fun_name == 'attention':
+            x4 = self.attention_list[3](x)
+        else:
+            x4 = self.agg_fn(x)
 
         x = torch.cat((x1, x2, x3, x4), dim=1)
 
@@ -448,7 +468,7 @@ class DCP(nn.Module):
         if args.emb_nn == 'pointnet':
             self.emb_nn = PointNet(emb_dims=self.emb_dims)
         elif args.emb_nn == 'dgcnn':
-            self.emb_nn = DGCNN(emb_dims=self.emb_dims)
+            self.emb_nn = DGCNN(emb_dims=self.emb_dims, agg_fun_name=args.agg_fun_name)
         elif args.emb_nn == 'idgcn':
             print("Using IDGCN")
             self.emb_nn = FeatureExtractor(features_dim=[3, 128, 256, 256])

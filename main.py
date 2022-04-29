@@ -229,8 +229,8 @@ def train_one_epoch(args, net, train_loader, opt, epoch):
         mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
         mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
     
-    save_clouds(src, target, epoch, name="input")
-    save_clouds(transformed_src, target, epoch)
+    save_clouds(src, target, epoch, name="input", basefilename="IDGCNFULL/")
+    save_clouds(transformed_src, target, epoch, basefilename="IDGCNFULL/")
     rotations_ab = np.concatenate(rotations_ab, axis=0)
     translations_ab = np.concatenate(translations_ab, axis=0)
     rotations_ab_pred = np.concatenate(rotations_ab_pred, axis=0)
@@ -325,7 +325,7 @@ def train(args, net, train_loader, test_loader, boardio, textio):
     best_test_t_rmse_ba = np.inf
     best_test_t_mae_ba = np.inf
 
-    for epoch in range(100, args.epochs+100):
+    for epoch in range(args.epochs):
         torch.cuda.empty_cache()
         scheduler.step()
         train_loss, train_cycle_loss, \
@@ -408,7 +408,8 @@ def train(args, net, train_loader, test_loader, boardio, textio):
             if torch.cuda.device_count() > 1:
                 torch.save(net.module.state_dict(), 'checkpoints/%s/models/model.best.t7' % args.exp_name)
             else:
-                torch.save(net.state_dict(), 'checkpoints/%s/models/model.best.t7' % args.exp_name)
+                torch.save(net.state_dict(), 'model_idgcn_full.pth')
+                torch.save(opt.state_dict(), 'opt.pth')
 
         textio.cprint('==TRAIN==')
         textio.cprint('A--------->B')
@@ -581,6 +582,8 @@ def main():
                         help='Divided factor for rotations')
     parser.add_argument('--model_path', type=str, default='pretrained/dcp_v1.t7', metavar='N',
                         help='Pretrained model path')
+    parser.add_argument('--agg_fun_name', type=str, default='attention', metavar='N',
+                        help='agg functions to use')
 
     args = parser.parse_args()
     torch.backends.cudnn.deterministic = True
@@ -589,7 +592,7 @@ def main():
     np.random.seed(args.seed)
 
     boardio = SummaryWriter(log_dir='checkpoints/' + args.exp_name)
-    wandb.init(project="InceptionDCPwithMultiHeadAttention")
+    wandb.init(project="DGCNNMultiheadAttention")
     _init_(args)
 
     textio = IOStream('checkpoints/' + args.exp_name + '/run.log')
