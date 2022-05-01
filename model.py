@@ -301,14 +301,14 @@ class DGCNN(nn.Module):
         elif agg_fun_name == "none":
             self.agg_fn = lambda x: x
         elif agg_fun_name == 'attention':
-            print("Using attention")
-            self.attention_list.append(MultiHeadGraphAttention(64, 3))
-            self.attention_list.append(MultiHeadGraphAttention(64, 3))
-            self.attention_list.append(MultiHeadGraphAttention(128, 3))
-            self.attention_list.append(MultiHeadGraphAttention(256, 3))
+            num_heads = 3
+            print("Using attention with ", num_heads, " heads")
+            self.attention_list.append(MultiHeadGraphAttention(64, num_heads))
+            self.attention_list.append(MultiHeadGraphAttention(64, num_heads))
+            self.attention_list.append(MultiHeadGraphAttention(128, num_heads))
+            self.attention_list.append(MultiHeadGraphAttention(256, num_heads))
 
     def forward(self, x):
-        dgcnn_start_time = time.time()
         batch_size, num_dims, num_points = x.size()
         x = get_graph_feature(x)
         x = F.relu(self.bn1(self.conv1(x)))
@@ -476,6 +476,7 @@ class DCP(nn.Module):
             raise Exception('Not implemented')
 
         if args.pointer == 'identity':
+            print("Using Identity")
             self.pointer = Identity()
         elif args.pointer == 'transformer':
             self.pointer = Transformer(args=args)

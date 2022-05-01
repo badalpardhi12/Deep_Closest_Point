@@ -6,12 +6,13 @@ from __future__ import print_function
 import os
 import gc
 import argparse
+from cv2 import cubeRoot
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.optim.lr_scheduler import MultiStepLR
-from data import ModelNet40, ModelNet10
+from torch.optim.lr_scheduler import MultiStepLR, ReduceLROnPlateau
+from data import ModelNet40, ModelNet10, SLAMData
 from model import DCP
 from util import transform_point_cloud, npmat2euler, render_clouds, save_clouds
 import numpy as np
@@ -150,7 +151,7 @@ def test_one_epoch(args, net, test_loader, epoch):
            translations_ba, rotations_ba_pred, translations_ba_pred, eulers_ab, eulers_ba
 
 
-def train_one_epoch(args, net, train_loader, opt, epoch):
+def train_one_epoch(args, net, train_loader, opt, epoch, scaler):
     net.train()
 
     mse_ab = 0
@@ -185,7 +186,9 @@ def train_one_epoch(args, net, train_loader, opt, epoch):
         batch_size = src.size(0)
         opt.zero_grad()
         num_examples += batch_size
+        #with torch.cuda.amp.autocast():
         rotation_ab_pred, translation_ab_pred, rotation_ba_pred, translation_ba_pred = net(src, target)
+        
 
         ## save rotation and translation
         rotations_ab.append(rotation_ab.detach().cpu().numpy())
@@ -206,7 +209,7 @@ def train_one_epoch(args, net, train_loader, opt, epoch):
         ###########################
         identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
         loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
-               + F.mse_loss(translation_ab_pred, translation_ab)
+            + F.mse_loss(translation_ab_pred, translation_ab)
         if args.cycle:
             rotation_loss = F.mse_loss(torch.matmul(rotation_ba_pred, rotation_ab_pred), identity.clone())
             translation_loss = torch.mean((torch.matmul(rotation_ba_pred.transpose(2, 1),
@@ -217,7 +220,11 @@ def train_one_epoch(args, net, train_loader, opt, epoch):
             loss = loss + cycle_loss * 0.1
 
         loss.backward()
+        #scaler.scale(loss).backward()
         opt.step()
+        #scaler.scale(opt)
+        #scaler.update()
+        
         total_loss += loss.item() * batch_size
 
         if args.cycle:
@@ -229,8 +236,8 @@ def train_one_epoch(args, net, train_loader, opt, epoch):
         mse_ba += torch.mean((transformed_target - src) ** 2, dim=[0, 1, 2]).item() * batch_size
         mae_ba += torch.mean(torch.abs(transformed_target - src), dim=[0, 1, 2]).item() * batch_size
     
-    save_clouds(src, target, epoch, name="input", basefilename="IDGCNFULL/")
-    save_clouds(transformed_src, target, epoch, basefilename="IDGCNFULL/")
+    save_clouds(src, target, epoch, name="input", basefilename="slam/")
+    save_clouds(transformed_src, target, epoch, basefilename="slam/")
     rotations_ab = np.concatenate(rotations_ab, axis=0)
     translations_ab = np.concatenate(translations_ab, axis=0)
     rotations_ab_pred = np.concatenate(rotations_ab_pred, axis=0)
@@ -291,15 +298,16 @@ def test(args, net, test_loader, boardio, textio):
                      test_r_mae_ba, test_t_mse_ba, test_t_rmse_ba, test_t_mae_ba))
 
 
-def train(args, net, train_loader, test_loader, boardio, textio):
+def train(args, net, train_loader, test_loader, boardio, textio, scaler):
     if args.use_sgd:
         print("Use SGD")
         opt = optim.SGD(net.parameters(), lr=args.lr * 100, momentum=args.momentum, weight_decay=1e-4)
     else:
         print("Use Adam")
-        opt = optim.Adam(net.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = MultiStepLR(opt, milestones=[75, 150, 200], gamma=0.1)
-
+        opt = optim.Adam(net.parameters(), lr=args.lr*0.1, weight_decay=1e-4)
+        #opt.load_state_dict(torch.load('opt.pth'))
+    #scheduler = MultiStepLR(opt, milestones=[75, 150, 200], gamma=0.1)
+    #scheduler = ReduceLROnPlateau(opt, mode='min', factor='.1', patience=)
 
     best_test_loss = np.inf
     best_test_cycle_loss = np.inf
@@ -325,14 +333,14 @@ def train(args, net, train_loader, test_loader, boardio, textio):
     best_test_t_rmse_ba = np.inf
     best_test_t_mae_ba = np.inf
 
-    for epoch in range(args.epochs):
+    for epoch in range(0, args.epochs, 1):
         torch.cuda.empty_cache()
-        scheduler.step()
+        #scheduler.step()
         train_loss, train_cycle_loss, \
         train_mse_ab, train_mae_ab, train_mse_ba, train_mae_ba, train_rotations_ab, train_translations_ab, \
         train_rotations_ab_pred, \
         train_translations_ab_pred, train_rotations_ba, train_translations_ba, train_rotations_ba_pred, \
-        train_translations_ba_pred, train_eulers_ab, train_eulers_ba = train_one_epoch(args, net, train_loader, opt, epoch)
+        train_translations_ba_pred, train_eulers_ab, train_eulers_ba = train_one_epoch(args, net, train_loader, opt, epoch, scaler)
         
         test_loss, test_cycle_loss, \
         test_mse_ab, test_mae_ab, test_mse_ba, test_mae_ba, test_rotations_ab, test_translations_ab, \
@@ -408,8 +416,8 @@ def train(args, net, train_loader, test_loader, boardio, textio):
             if torch.cuda.device_count() > 1:
                 torch.save(net.module.state_dict(), 'checkpoints/%s/models/model.best.t7' % args.exp_name)
             else:
-                torch.save(net.state_dict(), 'model_idgcn_full.pth')
-                torch.save(opt.state_dict(), 'opt.pth')
+                torch.save(net.state_dict(), 'model_idgcn_full_mp.pth')
+                torch.save(opt.state_dict(), 'opt_mp.pth')
 
         textio.cprint('==TRAIN==')
         textio.cprint('A--------->B')
@@ -470,7 +478,8 @@ def train(args, net, train_loader, test_loader, boardio, textio):
         boardio.add_scalar('B->A/train/translation/MSE', train_t_mse_ba, epoch)
         boardio.add_scalar('B->A/train/translation/RMSE', train_t_rmse_ba, epoch)
         boardio.add_scalar('B->A/train/translation/MAE', train_t_mae_ba, epoch)
-        wandb.log({'rotation/MSE': train_r_mse_ab, 'translation/MSE': train_mse_ab}, step=epoch)
+        wandb.log({'rotation/MSE/a-b/': train_r_mse_ab, 'translation/MSE': train_t_mse_ab,
+                   'rotation/MSE/b-a/': train_r_mse_ab}, step=epoch)
         ############TEST
         boardio.add_scalar('A->B/test/loss', test_loss, epoch)
         boardio.add_scalar('A->B/test/MSE', test_mse_ab, epoch)
@@ -493,7 +502,8 @@ def train(args, net, train_loader, test_loader, boardio, textio):
         boardio.add_scalar('B->A/test/translation/MSE', test_t_mse_ba, epoch)
         boardio.add_scalar('B->A/test/translation/RMSE', test_t_rmse_ba, epoch)
         boardio.add_scalar('B->A/test/translation/MAE', test_t_mae_ba, epoch)
-
+        wandb.log({'test/rotation/MSE/a-b/': test_r_mse_ab, 'test/translation/MSE': train_t_mse_ab,
+                   'test/rotation/MSE/b-a/': test_r_mse_ab}, step=epoch)
         ############BEST TEST
         boardio.add_scalar('A->B/best_test/loss', best_test_loss, epoch)
         boardio.add_scalar('A->B/best_test/MSE', best_test_mse_ab, epoch)
@@ -523,8 +533,129 @@ def train(args, net, train_loader, test_loader, boardio, textio):
             torch.save(net.state_dict(), 'checkpoints/%s/models/model.%d.t7' % (args.exp_name, epoch))
         gc.collect()
 
+def train_slam(args, 
+               net, 
+               train_loader, 
+               test_loader=None, 
+               boardio=None, 
+               textio=None, 
+               scaler=None, 
+               preload=True,
+               model_path="/home/akshay/Deep_Closest_Point/model_idgcn_full.pth",
+               filename_for_folder="slam"):
+    filename_for_folder = "slam_full_with_test"
+    print("Training SLAM")
+    if preload:
+        if net.load_state_dict(torch.load(model_path), strict=False):
+            print("Loaded from ", model_path)
+        else:
+            print("Not loaded pre-trained")
+    print("Training slam")
+    if args.use_sgd:
+        print("Use SGD")
+        opt = optim.SGD(net.parameters(), lr=args.lr * 100, momentum=args.momentum, weight_decay=1e-4)
+    else:
+        print("Use Adam")
+        opt = optim.Adam(net.parameters(), lr=args.lr*0.1, weight_decay=1e-4)
+        #opt.load_state_dict(torch.load('opt.pth'))
+    #scheduler = MultiStepLR(opt, milestones=[75, 150, 200], gamma=0.1)
+    #scheduler = ReduceLROnPlateau(opt, mode='min', factor='.1', patience=
+
+    for epoch in range(0, args.epochs, 1):
+        torch.cuda.empty_cache()
+        #scheduler.step()
+        train_loss, train_cycle_loss, \
+        train_mse_ab, train_mae_ab, train_mse_ba, train_mae_ba, train_rotations_ab, train_translations_ab, \
+        train_rotations_ab_pred, \
+        train_translations_ab_pred, train_rotations_ba, train_translations_ba, train_rotations_ba_pred, \
+        train_translations_ba_pred, train_eulers_ab, train_eulers_ba = train_one_epoch(args, net, train_loader, opt, epoch, scaler)
+        
+        #### test
+        test_loss, test_cycle_loss, \
+        test_mse_ab, test_mae_ab, test_mse_ba, test_mae_ba, test_rotations_ab, test_translations_ab, \
+        test_rotations_ab_pred, \
+        test_translations_ab_pred, test_rotations_ba, test_translations_ba, test_rotations_ba_pred, \
+        test_translations_ba_pred, test_eulers_ab, test_eulers_ba = test_one_epoch(args, net, test_loader, epoch)
+        ####
+        
+        
+        train_rmse_ab = np.sqrt(train_mse_ab)
+        test_rmse_ab = np.sqrt(test_mse_ab)
+
+        train_rmse_ba = np.sqrt(train_mse_ba)
+        test_rmse_ba = np.sqrt(test_mse_ba)
+
+        train_rotations_ab_pred_euler = npmat2euler(train_rotations_ab_pred)
+        train_r_mse_ab = np.mean((train_rotations_ab_pred_euler - np.degrees(train_eulers_ab)) ** 2)
+        train_r_rmse_ab = np.sqrt(train_r_mse_ab)
+        train_r_mae_ab = np.mean(np.abs(train_rotations_ab_pred_euler - np.degrees(train_eulers_ab)))
+        train_t_mse_ab = np.mean((train_translations_ab - train_translations_ab_pred) ** 2)
+        train_t_rmse_ab = np.sqrt(train_t_mse_ab)
+        train_t_mae_ab = np.mean(np.abs(train_translations_ab - train_translations_ab_pred))
+
+
+        train_rotations_ba_pred_euler = npmat2euler(train_rotations_ba_pred, 'xyz')
+        train_r_mse_ba = np.mean((train_rotations_ba_pred_euler - np.degrees(train_eulers_ba)) ** 2)
+        train_r_rmse_ba = np.sqrt(train_r_mse_ba)
+        train_r_mae_ba = np.mean(np.abs(train_rotations_ba_pred_euler - np.degrees(train_eulers_ba)))
+        train_t_mse_ba = np.mean((train_translations_ba - train_translations_ba_pred) ** 2)
+        train_t_rmse_ba = np.sqrt(train_t_mse_ba)
+        train_t_mae_ba = np.mean(np.abs(train_translations_ba - train_translations_ba_pred))
+
+        test_rotations_ab_pred_euler = npmat2euler(test_rotations_ab_pred)
+        test_r_mse_ab = np.mean((test_rotations_ab_pred_euler - np.degrees(test_eulers_ab)) ** 2)
+        test_r_rmse_ab = np.sqrt(test_r_mse_ab)
+        test_r_mae_ab = np.mean(np.abs(test_rotations_ab_pred_euler - np.degrees(test_eulers_ab)))
+        test_t_mse_ab = np.mean((test_translations_ab - test_translations_ab_pred) ** 2)
+        test_t_rmse_ab = np.sqrt(test_t_mse_ab)
+        test_t_mae_ab = np.mean(np.abs(test_translations_ab - test_translations_ab_pred))
+
+        test_rotations_ba_pred_euler = npmat2euler(test_rotations_ba_pred, 'xyz')
+        test_r_mse_ba = np.mean((test_rotations_ba_pred_euler - np.degrees(test_eulers_ba)) ** 2)
+        test_r_rmse_ba = np.sqrt(test_r_mse_ba)
+        test_r_mae_ba = np.mean(np.abs(test_rotations_ba_pred_euler - np.degrees(test_eulers_ba)))
+        test_t_mse_ba = np.mean((test_translations_ba - test_translations_ba_pred) ** 2)
+        test_t_rmse_ba = np.sqrt(test_t_mse_ba)
+        test_t_mae_ba = np.mean(np.abs(test_translations_ba - test_translations_ba_pred))
+
+
+        wandb.log({'rotation/MSE/a-b/': train_r_mse_ab, 'translation/MSE': train_t_mse_ab,
+                   'test/rotation/MSE/a-b/': test_r_mse_ab, 'translation/MSE': test_t_mse_ab}, step=epoch)
+                   
+        textio.cprint('==TRAIN==')
+        textio.cprint('A--------->B')
+        textio.cprint('EPOCH:: %d, Loss: %f, Cycle Loss:, %f, MSE: %f, RMSE: %f, MAE: %f, rot_MSE: %f, rot_RMSE: %f, '
+                      'rot_MAE: %f, trans_MSE: %f, trans_RMSE: %f, trans_MAE: %f'
+                      % (epoch, train_loss, train_cycle_loss, train_mse_ab, train_rmse_ab, train_mae_ab, train_r_mse_ab,
+                         train_r_rmse_ab, train_r_mae_ab, train_t_mse_ab, train_t_rmse_ab, train_t_mae_ab))
+        textio.cprint('B--------->A')
+        textio.cprint('EPOCH:: %d, Loss: %f, MSE: %f, RMSE: %f, MAE: %f, rot_MSE: %f, rot_RMSE: %f, '
+                      'rot_MAE: %f, trans_MSE: %f, trans_RMSE: %f, trans_MAE: %f'
+                      % (epoch, train_loss, train_mse_ba, train_rmse_ba, train_mae_ba, train_r_mse_ba, train_r_rmse_ba,
+                         train_r_mae_ba, train_t_mse_ba, train_t_rmse_ba, train_t_mae_ba))
+        textio.cprint('==TEST==')
+        textio.cprint('A--------->B')
+        textio.cprint('EPOCH:: %d, Loss: %f, Cycle Loss: %f, MSE: %f, RMSE: %f, MAE: %f, rot_MSE: %f, rot_RMSE: %f, '
+                      'rot_MAE: %f, trans_MSE: %f, trans_RMSE: %f, trans_MAE: %f'
+                      % (epoch, test_loss, test_cycle_loss, test_mse_ab, test_rmse_ab, test_mae_ab, test_r_mse_ab,
+                         test_r_rmse_ab, test_r_mae_ab, test_t_mse_ab, test_t_rmse_ab, test_t_mae_ab))
+        textio.cprint('B--------->A')
+        textio.cprint('EPOCH:: %d, Loss: %f, MSE: %f, RMSE: %f, MAE: %f, rot_MSE: %f, rot_RMSE: %f, '
+                      'rot_MAE: %f, trans_MSE: %f, trans_RMSE: %f, trans_MAE: %f'
+                      % (epoch, test_loss, test_mse_ba, test_rmse_ba, test_mae_ba, test_r_mse_ba, test_r_rmse_ba,
+                         test_r_mae_ba, test_t_mse_ba, test_t_rmse_ba, test_t_mae_ba))
+
+        torch.save(net.state_dict(), filename_for_folder + "_model.pth")
+        torch.save(opt.state_dict(), filename_for_folder + '_opt.pth')
+
+        gc.collect()
+
 
 def main():
+    #####
+    scaler = torch.cuda.amp.GradScaler()
+    filename_for_folders = "slam"
+    #####
     parser = argparse.ArgumentParser(description='Point Cloud Registration')
     parser.add_argument('--exp_name', type=str, default='exp', metavar='N',
                         help='Name of the experiment')
@@ -534,7 +665,7 @@ def main():
     parser.add_argument('--emb_nn', type=str, default='idgcn', metavar='N',
                         choices=['pointnet', 'dgcnn', 'idgcn'],
                         help='Embedding nn to use, [pointnet, dgcnn]')
-    parser.add_argument('--pointer', type=str, default='transformer', metavar='N',
+    parser.add_argument('--pointer', type=str, default='identity', metavar='N',
                         choices=['identity', 'transformer'],
                         help='Attention-based pointer generator to use, [identity, transformer]')
     parser.add_argument('--head', type=str, default='svd', metavar='N',
@@ -576,7 +707,7 @@ def main():
                         help='Wheter to test on unseen category')
     parser.add_argument('--num_points', type=int, default=1024, metavar='N',
                         help='Num of points to use')
-    parser.add_argument('--dataset', type=str, default='modelnet40', choices=['modelnet40', 'modelnet10'], metavar='N',
+    parser.add_argument('--dataset', type=str, default='slam', choices=['modelnet40', 'modelnet10', "slam"], metavar='N',
                         help='dataset to use')
     parser.add_argument('--factor', type=float, default=4, metavar='N',
                         help='Divided factor for rotations')
@@ -592,7 +723,7 @@ def main():
     np.random.seed(args.seed)
 
     boardio = SummaryWriter(log_dir='checkpoints/' + args.exp_name)
-    wandb.init(project="DGCNNMultiheadAttention")
+    wandb.init(project=filename_for_folders)
     _init_(args)
 
     textio = IOStream('checkpoints/' + args.exp_name + '/run.log')
@@ -614,6 +745,15 @@ def main():
         test_loader = DataLoader(
             ModelNet10(Path("ModelNet10"), args.num_points, partition="test"),
             batch_size=args.batch_size, shuffle=False, drop_last=False)
+
+    elif args.dataset == "slam":
+        train_loader = DataLoader(
+                SLAMData(), batch_size=args.batch_size, shuffle=True, drop_last=False)
+        test_loader = DataLoader(
+                SLAMData(basefilename="/home/akshay/Downloads/2011_09_26_downsampled" 
+                                      "/2011_09_26_downsampled/2011_09_26_drive_0011_sync" 
+                                      "/velodyne_points/data"),
+                        batch_size=args.batch_size, shuffle=False, drop_last=False)
     else:
         raise Exception("not implemented")
     start_from_checkpoint = False
@@ -639,8 +779,11 @@ def main():
     else:
         if start_from_checkpoint:
             print("loaded")
-            net.load_state_dict(torch.load("/home/akshay/Deep_Closest_Point/checkpoints/exp/models/model.99.t7"))
-        train(args, net, train_loader, test_loader, boardio, textio)
+            net.load_state_dict(torch.load("model_idgcn_full.pth"), strict=False)
+        if args.dataset == "slam":
+            train_slam(args, net, train_loader, test_loader, boardio, textio, scaler, filename_for_folder=filename_for_folders)
+        else:
+            train(args, net, train_loader, test_loader, boardio, textio, scaler)
 
 
     print('FINISH')

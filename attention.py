@@ -28,7 +28,7 @@ class GraphAttention(nn.Module):
         return out     
 
 class MultiHeadGraphAttention(nn.Module):
-    def __init__(self, in_dimension, no_of_heads=3):
+    def __init__(self, in_dimension, no_of_heads=4):
         super(MultiHeadGraphAttention, self).__init__()
         self.layers = nn.ModuleList()
         for i in range(no_of_heads):

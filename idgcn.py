@@ -14,20 +14,20 @@ from attention import GraphAttention, MultiHeadGraphAttention
 device = torch.device('cuda')
 def find_neighbors(input_points=None, K=20):
     #input points dim B*N*D
-    start_time = time.time()
     if len(input_points.shape) == 4:
         input_points = input_points.squeeze(-1)
     input_points = input_points.permute((0, 2, 1))
     _, neighbor_indices, _ = knn_points(input_points, input_points, K=K)
     return neighbor_indices
 
-def knn(x, k):
-    start_time = time.time()
+def knn(x, K):
+    print(x.shape)
+    x = x.squeeze()
     inner = -2 * torch.matmul(x.transpose(2, 1).contiguous(), x)
     xx = torch.sum(x ** 2, dim=1, keepdim=True)
     pairwise_distance = -xx - inner - xx.transpose(2, 1).contiguous()
 
-    idx = pairwise_distance.topk(k=k, dim=-1)[1]  # (batch_size, num_points, k)
+    idx = pairwise_distance.topk(k=K, dim=-1)[1]  # (batch_size, num_points, k)
     return idx
 
 def generate_dilated_neighbors(neighbor_indices, dilation=4):
@@ -106,7 +106,8 @@ class DenseGCN(nn.Module):
     def __init__(self, 
                 input_features, 
                 output_features, 
-                agg_fun_name='max'
+                agg_fun_name='max',
+                num_heads=3,
                 ):
         super(DenseGCN, self).__init__()
         if agg_fun_name == 'max':
@@ -118,8 +119,9 @@ class DenseGCN(nn.Module):
         elif agg_fun_name == "none":
             self.agg_fn = lambda x: x
         elif agg_fun_name == 'attention':
-            print("Using Attention")
-            self.agg_fn = MultiHeadGraphAttention(output_features, 3) 
+            print("Using Attention with numheads: ", num_heads)
+            self.agg_fn = MultiHeadGraphAttention(output_features, num_heads) 
+
         self.conv_bn = ConvBNList([input_features], self.agg_fn, output_features)  
 
     def forward(self, feature):

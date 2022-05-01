@@ -293,6 +293,83 @@ def default_transforms():
                                 PointSampler(1024),
                               ])
 
+class SLAMData(Dataset):
+    def __init__(self, 
+                basefilename="/home/akshay/Downloads/2011_09_26_downsampled/"
+                                    "2011_09_26_downsampled/2011_09_26_drive_0001_sync/"
+                                    "velodyne_points/data/", 
+                num_points=2048, 
+                partition='train', 
+                gaussian_noise=False, 
+                unseen=False, 
+                factor=4) -> None:
+        super().__init__()
+        self.basefilename = basefilename
+        self.filenames = [filename for filename in sorted(os.listdir(basefilename))]
+        self.num_points = num_points
+        self.partition = partition
+        self.gaussian_noise = gaussian_noise
+        self.unseen = unseen
+        self.factor = factor
+
+    def __getitem__(self, index):
+        pointcloud = o3d.io.read_point_cloud(os.path.join(self.basefilename,
+                                                           self.filenames[index]))
+        pointcloud = np.asarray(pointcloud.points)
+        deficit_no = self.num_points - pointcloud.shape[0]
+        if deficit_no <= 0:
+            pointcloud = pointcloud[:self.num_points, :]
+        else:
+            padding = np.zeros((deficit_no, pointcloud.shape[1]))
+            pointcloud = np.concatenate([pointcloud, padding], axis=0)
+        anglex = np.random.uniform() * np.pi / self.factor
+        angley = np.random.uniform() * np.pi / self.factor
+        anglez = np.random.uniform() * np.pi / self.factor
+
+        ####
+        translation_param = 15
+        ####
+        
+        cosx = np.cos(anglex)
+        cosy = np.cos(angley)
+        cosz = np.cos(anglez)
+        sinx = np.sin(anglex)
+        siny = np.sin(angley)
+        sinz = np.sin(anglez)
+        Rx = np.array([[1, 0, 0],
+                        [0, cosx, -sinx],
+                        [0, sinx, cosx]])
+        Ry = np.array([[cosy, 0, siny],
+                        [0, 1, 0],
+                        [-siny, 0, cosy]])
+        Rz = np.array([[cosz, -sinz, 0],
+                        [sinz, cosz, 0],
+                        [0, 0, 1]])
+        R_ab = Rx.dot(Ry).dot(Rz)
+        R_ba = R_ab.T
+        translation_ab = np.array([np.random.uniform(-translation_param, translation_param), 
+                                   np.random.uniform(-translation_param, translation_param),
+                                   np.random.uniform(-translation_param, translation_param)])
+        translation_ba = -R_ba.dot(translation_ab)
+
+        pointcloud1 = pointcloud.T
+
+        rotation_ab = Rotation.from_euler('zyx', [anglez, angley, anglex])
+        pointcloud2 = rotation_ab.apply(pointcloud1.T).T + np.expand_dims(translation_ab, axis=1)
+
+        euler_ab = np.asarray([anglez, angley, anglex])
+        euler_ba = -euler_ab[::-1]
+
+        pointcloud1 = np.random.permutation(pointcloud1.T).T
+        pointcloud2 = np.random.permutation(pointcloud2.T).T
+
+        return pointcloud1.astype('float32'), pointcloud2.astype('float32'), R_ab.astype('float32'), \
+               translation_ab.astype('float32'), R_ba.astype('float32'), translation_ba.astype('float32'), \
+               euler_ab.astype('float32'), euler_ba.astype('float32')
+
+    def __len__(self):
+        return len(self.filenames)
+
 if __name__ == '__main__':
     print("Loading data")
     train = ModelNet10(Path("ModelNet10"), 1024)
