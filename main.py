@@ -550,13 +550,12 @@ def train_slam(args,
             print("Loaded from ", model_path)
         else:
             print("Not loaded pre-trained")
-    print("Training slam")
     if args.use_sgd:
         print("Use SGD")
         opt = optim.SGD(net.parameters(), lr=args.lr * 100, momentum=args.momentum, weight_decay=1e-4)
     else:
         print("Use Adam")
-        opt = optim.Adam(net.parameters(), lr=args.lr*0.1, weight_decay=1e-4)
+        opt = optim.Adam(net.parameters(), lr=0.0001, weight_decay=1e-4)
         #opt.load_state_dict(torch.load('opt.pth'))
     #scheduler = MultiStepLR(opt, milestones=[75, 150, 200], gamma=0.1)
     #scheduler = ReduceLROnPlateau(opt, mode='min', factor='.1', patience=
@@ -753,7 +752,7 @@ def main():
                 SLAMData(basefilename="/home/akshay/Downloads/2011_09_26_downsampled" 
                                       "/2011_09_26_downsampled/2011_09_26_drive_0011_sync" 
                                       "/velodyne_points/data"),
-                        batch_size=args.batch_size, shuffle=False, drop_last=False)
+                        batch_size=2, shuffle=False, drop_last=False)
     else:
         raise Exception("not implemented")
     start_from_checkpoint = False
